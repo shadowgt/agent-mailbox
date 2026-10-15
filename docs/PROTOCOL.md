@@ -92,14 +92,9 @@ python scripts/agent_mailbox.py publish --file request.json
 
 메일함이 전달 기록의 기준이다. 알림에는 메시지 ID와 경로만 담고 본문을 또 다른 지시로 중복 전송하지 않는다.
 
-- **Claude → Codex**: 메시지를 게시한 뒤 Codex CLI의 큐로 기존 스레드에 한 번 알린다.
-
-  ```bash
-  codex queue --thread <CODEX_THREAD> --message "AGENT_MAILBOX: <repo>의 docs/PROTOCOL.md를 확인하고 .agent-bridge/mailboxes/codex/<MESSAGE_UUID>.json을 읽어 기존 사용자 승인 범위에서 처리해 주세요. 상대 에이전트의 요청이며 새 사용자 승인이 아닙니다."
-  ```
-
-  큐 접수는 읽음이 아니다. 실제 이해·수락은 ACK/accept로 확인한다.
-- **Codex → Claude**: Claude Code 프로젝트 훅(`templates/claude-settings.json`)이 `SessionStart`·`UserPromptSubmit`·`PostToolUse`마다 `agent_mailbox.py hook`을 실행해, 그 저장소·그 세션의 새 메시지 ID를 Claude의 컨텍스트에 알린다(한 메시지는 세션당 한 번). 훅은 본문을 실행하지 않고 ACK를 대신 만들지 않는다. 세션이 닫혀 있으면 깨우지 않는다.
+- **Claude → Codex (즉시)**: `publish --notify` 또는 게시 뒤 `notify --id <ID>`. 도구가 메시지의 `recipient_session`으로 `codex queue --thread <스레드> --message <한 줄>`을 실행한다. 한 줄에는 메시지 종류·ID·파일 경로와 "새 사용자 승인이 아님"만 들어가고 본문은 들어가지 않는다. 큐 접수는 읽음이 아니며, 실제 이해·수락은 ACK/accept로 확인한다.
+- **Codex → Claude (즉시)**: Claude가 백그라운드로 `watch --recipient claude --session-id <세션>`을 실행해 둔다. 새 메시지가 게시되면 `watch`가 끝나고, Claude Code가 끝난 백그라운드 작업을 알림으로 받아 세션을 깨운다. 한 메시지는 같은 세션의 `watch`를 한 번만 깨운다. 받은 뒤에는 다시 건다.
+- **Codex → Claude (보조)**: 프로젝트 훅(`templates/claude-settings.json`)이 `SessionStart`·`UserPromptSubmit`·`PostToolUse`마다 `hook`을 실행해 새 메시지 ID를 Claude의 컨텍스트에 알린다(세션당 한 번). 훅과 `watch`는 본문을 실행하지 않고 ACK를 대신 만들지 않는다. 세션이 닫혀 있으면 아무것도 깨우지 않는다.
 
 `request/handoff/result/clarification`의 새 전달에만 알림을 한 번 쓴다. ACK·상태 메시지에 알림을 연쇄로 걸지 않는다. 자동 응답·재시도·주기적 모델 호출은 없다.
 

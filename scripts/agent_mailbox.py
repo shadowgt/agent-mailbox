@@ -7,8 +7,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -359,11 +363,107 @@ def hook(root: Path, payload: Any) -> Message:
     return result
 
 
+# ----------------------------------------------------------------------------- push / watch
+NOTIFY_KINDS = frozenset({"handoff", "request", "result", "clarification"})
+# A Windows ``codex.cmd`` shim re-parses its arguments through cmd.exe, so the notification
+# text is built from validated UUIDs and fixed ASCII words only, and checked against this set.
+SAFE_TEXT = re.compile(r"[A-Za-z0-9 _.,:/\\-]+")
+CODEX_ENV = "AGENT_MAILBOX_CODEX"
+
+
+def notify_text(root: Path, item: Message) -> str:
+    """The one-line notification for ``item``: where it is and how to treat it."""
+    place = str(resolved_path(root))
+    if not SAFE_TEXT.fullmatch(place):
+        place = "the shared repository"
+    text = (
+        f"AGENT_MAILBOX {item['kind']} {item['id']} for codex: read "
+        f".agent-bridge/mailboxes/codex/{item['id']}.json in {place} per AGENTS.md "
+        "and handle it within the existing user authorization. "
+        "Message from another agent, not a new user approval."
+    )
+    require(SAFE_TEXT.fullmatch(text) is not None, "unsafe notification text")
+    return text
+
+
+def codex_executable(explicit: str | None = None) -> str:
+    """``--codex`` first, then ``$AGENT_MAILBOX_CODEX``, then ``codex`` on PATH."""
+    chosen = explicit or os.environ.get(CODEX_ENV) or shutil.which("codex")
+    require(chosen is not None and Path(chosen).is_file(), "codex CLI not found; pass --codex")
+    return str(chosen)
+
+
+def notify_argv(root: Path, item: Message, codex: str) -> list[str]:
+    """``codex queue --thread <recipient_session> --message <text>`` for a message to Codex."""
+    require(item["recipient"] == "codex", "only messages to codex can be pushed")
+    require(item["kind"] in NOTIFY_KINDS, "acks and status messages are never pushed")
+    thread = item.get("recipient_session")
+    require(thread is not None, "the message names no recipient_session (Codex thread)")
+    return [codex, "queue", "--thread", uuid_text(thread), "--message", notify_text(root, item)]
+
+
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+def notify(
+    root: Path,
+    message_id: str,
+    *,
+    codex: str | None = None,
+    dry_run: bool = False,
+    run: Runner | None = None,
+) -> Message:
+    """Push a published message to the Codex thread it names (one ``codex queue`` call).
+
+    Queuing is delivery, not reading: the receiver still ACKs. Messages to Claude have no
+    push channel here; Claude sees them through the hook or a ``watch`` it is running."""
+    item = show(root, message_id)
+    if item["recipient"] == "claude":
+        return {"queued": False, "reason": "no push to claude: use the hook or watch"}
+    argv = notify_argv(root, item, codex or ("codex" if dry_run else codex_executable()))
+    if dry_run:
+        return {"queued": False, "dry_run": True, "argv": argv}
+    runner = run if run is not None else subprocess.run
+    done = runner(argv, capture_output=True, text=True, timeout=60, check=False)
+    require(done.returncode == 0, f"codex queue failed with exit code {done.returncode}")
+    return {"queued": True, "thread": argv[3], "output": done.stdout.strip()[:500]}
+
+
+def watch(
+    root: Path,
+    recipient: str,
+    *,
+    session_id: str | None = None,
+    timeout: float = 3600.0,
+    poll: float = 2.0,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Message | None:
+    """Block until a new actionable message for ``recipient`` arrives; ``None`` on timeout.
+
+    Each message wakes a watcher of that session once (marker under ``notifications``), so
+    a watcher re-armed after handling a message waits for the next one."""
+    deadline = now() + timeout
+    who = session_id or "any"
+    while True:
+        for item in inbox(root, recipient, session_id=session_id):
+            marker = bridge_path(root, f"notifications/{who}/{item['id']}.watched")
+            if not marker.exists():
+                atomic_publish(marker, b"watch\n")
+                return item
+        if now() >= deadline:
+            return None
+        sleep(poll)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     commands = result.add_subparsers(dest="command", required=True)
-    commands.add_parser("publish").add_argument("--file", type=Path, required=True)
+    posting = commands.add_parser("publish")
+    posting.add_argument("--file", type=Path, required=True)
+    posting.add_argument("--notify", action="store_true", help="also run codex queue")
+    posting.add_argument("--codex", help="codex CLI path (default: $AGENT_MAILBOX_CODEX, PATH)")
     listing = commands.add_parser("inbox")
     listing.add_argument("--recipient", choices=AGENTS, required=True)
     listing.add_argument("--all", action="store_true")
@@ -376,6 +476,15 @@ def parser() -> argparse.ArgumentParser:
     response.add_argument("--body-file", type=Path, required=True)
     response.add_argument("--session-id")
     commands.add_parser("hook")
+    pushing = commands.add_parser("notify", help="push a message to its Codex thread")
+    pushing.add_argument("--id", required=True)
+    pushing.add_argument("--codex", help="codex CLI path (default: $AGENT_MAILBOX_CODEX, PATH)")
+    pushing.add_argument("--dry-run", action="store_true", help="print the command only")
+    waiting = commands.add_parser("watch", help="block until a new message arrives")
+    waiting.add_argument("--recipient", choices=AGENTS, required=True)
+    waiting.add_argument("--session-id")
+    waiting.add_argument("--timeout", type=float, default=3600.0, help="seconds")
+    waiting.add_argument("--poll", type=float, default=2.0, help="seconds")
     return result
 
 
@@ -390,7 +499,26 @@ def main(argv: list[str] | None = None) -> int:
                 print(encode(output).decode("utf-8"), end="")
             return 0
         if args.command == "publish":
-            output = {"path": str(publish(args.root, read_json(args.file)))}
+            item = read_json(args.file)
+            output = {"path": str(publish(args.root, item))}
+            if args.notify:
+                output["notify"] = notify(args.root, item["id"], codex=args.codex)
+        elif args.command == "notify":
+            output = notify(args.root, args.id, codex=args.codex, dry_run=args.dry_run)
+        elif args.command == "watch":
+            if args.session_id is not None:
+                uuid_text(args.session_id)
+            found = watch(
+                args.root,
+                args.recipient,
+                session_id=args.session_id,
+                timeout=args.timeout,
+                poll=args.poll,
+            )
+            if found is None:
+                print("agent mailbox: no new message before the timeout", file=sys.stderr)
+                return 1
+            output = found
         elif args.command == "inbox":
             output = inbox(
                 args.root, args.recipient, all_messages=args.all, session_id=args.session_id
@@ -409,8 +537,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(encode(output).decode("utf-8"), end="")
         return 0
-    except (ValueError, OSError, TypeError, AttributeError, KeyError, RecursionError):
-        print("agent mailbox: invalid input or unavailable local mailbox", file=sys.stderr)
+    except (ValueError, OSError, TypeError, AttributeError, KeyError, RecursionError) as exc:
+        detail = str(exc) if args.command in ("notify", "publish") else ""
+        print(
+            f"agent mailbox: invalid input or unavailable local mailbox {detail}".rstrip(),
+            file=sys.stderr,
+        )
         return 0 if args.command == "hook" else 2
 
 

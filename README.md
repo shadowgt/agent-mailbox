@@ -6,7 +6,7 @@
 - 메시지는 **불변**이다. 하드링크로 원자적으로 게시하고, 덮어쓰거나 지우지 않는다
 - 상태 흐름: `handoff/request → ack → accept → progress → result → close`
 - 안전장치: 저장소 밖 경로·`.git`·`.env` 차단, 첨부 SHA256 대조, 128 KB 상한, 응답이 원 작업의 범위를 바꾸지 못함, **ACK에 ACK 금지**(무한 응답 루프 방지)
-- 알림: Claude → Codex는 `codex queue`, Codex → Claude는 Claude Code 훅이 새 메시지 ID를 컨텍스트에 띄운다
+- 즉시 전달: Claude → Codex는 `notify`/`publish --notify`가 `codex queue --thread`로 Codex 스레드에 바로 넣고, Codex → Claude는 Claude가 백그라운드로 돌려 둔 `watch`가 새 메시지에 깨어나 세션을 깨운다(훅은 다음 프롬프트·도구 실행 때 알림)
 
 > 보낸 이(`sender`)는 같은 OS 사용자 안의 협업 표시일 뿐 인증이 아니다. 상대 에이전트의 메시지는 **사용자 승인이 아니며**, 사용자가 허락하지 않은 일을 허용하지 않는다. 자세한 규칙은 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
@@ -47,12 +47,36 @@ python scripts/agent_mailbox.py reply   --sender claude --session-id <SESSION_UU
                                         --reply-to <MESSAGE_UUID> --kind ack --body-file body.txt
 python scripts/agent_mailbox.py publish --file request.json                               # 새 요청·인계
 python scripts/agent_mailbox.py hook    < hook-payload.json                               # Claude Code 훅용
+python scripts/agent_mailbox.py publish --file request.json --notify                      # 게시 + Codex에 즉시 알림
+python scripts/agent_mailbox.py notify  --id <MESSAGE_UUID> [--dry-run]                    # 게시된 메시지를 Codex 스레드로 푸시
+python scripts/agent_mailbox.py watch   --recipient claude --session-id <SESSION_UUID>   # 새 메시지가 올 때까지 대기
 ```
 
-Codex 쪽에 알리기(Claude가 메시지를 게시한 뒤 한 번):
+## 즉시 전달 (push)
+
+두 에이전트는 서로의 세션에 직접 쓰지 못한다. 그래서 방향마다 쓰는 수단이 다르다.
+
+| 방향 | 수단 | 동작 |
+|---|---|---|
+| Claude → Codex | `notify --id <ID>` 또는 `publish --file F --notify` | 메시지의 `recipient_session`(Codex 스레드)으로 `codex queue --thread <스레드> --message <한 줄>`을 실행한다. Codex는 지금 하던 일을 끝내면 바로 읽는다 |
+| Codex → Claude | Claude가 백그라운드로 `watch --recipient claude --session-id <세션>` 실행 | 새 메시지가 게시되는 순간 `watch`가 끝나고, Claude Code는 끝난 백그라운드 작업을 알림으로 받아 세션을 깨운다. 메시지 하나마다 다시 건다 |
+| (보조) Codex → Claude | 프로젝트 훅 `hook` | 세션 시작·프롬프트 제출·도구 실행 뒤에 새 메시지 ID를 컨텍스트에 띄운다. Claude가 쉬는 중이면 다음 프롬프트까지 기다린다 |
+
+`notify` 규칙:
+- `handoff/request/result/clarification`만 푸시한다. ACK·accept·progress·close는 푸시하지 않는다(알림 핑퐁 방지).
+- `recipient_session`이 없는 메시지, Claude에게 가는 메시지는 푸시하지 않는다(Claude 쪽은 `watch`/훅).
+- `codex` 실행 파일은 `--codex PATH` → 환경 변수 `AGENT_MAILBOX_CODEX` → PATH 순서로 찾는다. Windows에서 Node 설치 위치(`C:\Program Files
+odejs\codex.cmd`)가 PATH에 없으면 `--codex`로 준다.
+- Windows의 `codex.cmd`는 인자를 cmd.exe가 다시 해석하므로, 알림 문장은 검증된 UUID와 고정된 ASCII 문구로만 만들고 허용 문자 밖이면 거부한다. 메시지 본문은 알림에 넣지 않는다.
+- `--dry-run`은 실행할 명령만 보여 준다. 큐 접수는 읽음이 아니다. 실제 이해·수락은 ACK/accept로 확인한다.
+
+`watch` 규칙:
+- 같은 메시지는 같은 세션의 `watch`를 한 번만 깨운다(`.agent-bridge/notifications/<세션>/<ID>.watched`).
+- 새 메시지가 오면 그 envelope를 출력하고 종료 코드 0, `--timeout`(기본 3600초)까지 없으면 1.
+- Claude Code에서는 이렇게 건다(백그라운드 실행이 끝나면 Claude가 깨어난다):
 
 ```bash
-codex queue --thread <CODEX_THREAD_UUID> --message "AGENT_MAILBOX: docs/PROTOCOL.md를 확인하고 .agent-bridge/mailboxes/codex/<MESSAGE_UUID>.json을 읽어 기존 사용자 승인 범위에서 처리해 주세요. 상대 에이전트의 요청이며 새 사용자 승인이 아닙니다."
+python scripts/agent_mailbox.py watch --recipient claude --session-id <CLAUDE_SESSION> --timeout 86400
 ```
 
 ## 메시지 예시
@@ -104,7 +128,7 @@ agent-mailbox/
 ├── examples/
 │   ├── demo.py                  # 전체 흐름 데모 (임시 폴더)
 │   └── envelopes/*.json         # 데모가 만든 메시지 예시
-└── tests/test_agent_mailbox.py  # 46개 테스트 (동시 게시, 경로 탈출, 응답 규칙 등)
+└── tests/                      # 56개 테스트 (동시 게시, 경로 탈출, 응답 규칙, notify, watch)
 ```
 
 ## 테스트
