@@ -1,0 +1,23 @@
+{
+  "artifacts": [],
+  "base_commit": "0000000000000000000000000000000000000000",
+  "body": "Verified; closing.",
+  "created_at": "2026-10-15T00:20:11.127151+00:00",
+  "expires_at": null,
+  "id": "3e552cc4-de3a-42db-ae68-b97735eaa343",
+  "kind": "close",
+  "recipient": "claude",
+  "recipient_session": "11111111-1111-4111-8111-111111111111",
+  "reply_to": "7d5fb0cf-d4b6-4b67-b7a8-376707b91550",
+  "scope": {
+    "mode": "read_only",
+    "paths": [
+      "docs/design.md"
+    ]
+  },
+  "sender": "codex",
+  "sender_session": "22222222-2222-4222-8222-222222222222",
+  "task_id": "design-review-01",
+  "thread_id": "d72a0d84-8e80-4f25-99c2-90358d7bae42",
+  "version": 1
+}

@@ -1,0 +1,23 @@
+{
+  "artifacts": [],
+  "base_commit": "0000000000000000000000000000000000000000",
+  "body": "No CRITICAL or HIGH findings. LOW: section 2 lacks an example.",
+  "created_at": "2026-10-15T00:20:11.096151+00:00",
+  "expires_at": null,
+  "id": "7d5fb0cf-d4b6-4b67-b7a8-376707b91550",
+  "kind": "result",
+  "recipient": "codex",
+  "recipient_session": "22222222-2222-4222-8222-222222222222",
+  "reply_to": "870cb9aa-736c-4cdf-9725-69181a71981b",
+  "scope": {
+    "mode": "read_only",
+    "paths": [
+      "docs/design.md"
+    ]
+  },
+  "sender": "claude",
+  "sender_session": "11111111-1111-4111-8111-111111111111",
+  "task_id": "design-review-01",
+  "thread_id": "d72a0d84-8e80-4f25-99c2-90358d7bae42",
+  "version": 1
+}

@@ -1,0 +1,20 @@
+[project]
+name = "agent-mailbox"
+version = "1.0.0"
+description = "File mailbox for Claude Code <-> Codex handoffs and requests in one repository"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+strict = true
+files = ["scripts", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]

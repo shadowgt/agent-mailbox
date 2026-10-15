@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -X utf8 -B <REPO_ROOT>/scripts/agent_mailbox.py hook",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -X utf8 -B <REPO_ROOT>/scripts/agent_mailbox.py hook",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -X utf8 -B <REPO_ROOT>/scripts/agent_mailbox.py hook",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
