@@ -65,8 +65,7 @@ python scripts/agent_mailbox.py watch   --recipient claude --session-id <SESSION
 `notify` 규칙:
 - `handoff/request/result/clarification`만 푸시한다. ACK·accept·progress·close는 푸시하지 않는다(알림 핑퐁 방지).
 - `recipient_session`이 없는 메시지, Claude에게 가는 메시지는 푸시하지 않는다(Claude 쪽은 `watch`/훅).
-- `codex` 실행 파일은 `--codex PATH` → 환경 변수 `AGENT_MAILBOX_CODEX` → PATH 순서로 찾는다. Windows에서 Node 설치 위치(`C:\Program Files
-odejs\codex.cmd`)가 PATH에 없으면 `--codex`로 준다.
+- `codex` 실행 파일은 `--codex PATH` → 환경 변수 `AGENT_MAILBOX_CODEX` → PATH 순서로 찾는다. Windows에서 Node 설치 위치(`C:\Program Files\nodejs\codex.cmd`)가 PATH에 없으면 `--codex`로 준다.
 - Windows의 `codex.cmd`는 인자를 cmd.exe가 다시 해석하므로, 알림 문장은 검증된 UUID와 고정된 ASCII 문구로만 만들고 허용 문자 밖이면 거부한다. 메시지 본문은 알림에 넣지 않는다.
 - `--dry-run`은 실행할 명령만 보여 준다. 큐 접수는 읽음이 아니다. 실제 이해·수락은 ACK/accept로 확인한다.
 
@@ -118,7 +117,7 @@ python scripts/agent_mailbox.py watch --recipient claude --session-id <CLAUDE_SE
 
 ```
 agent-mailbox/
-├── scripts/agent_mailbox.py     # 도구 (publish / inbox / show / reply / hook)
+├── scripts/agent_mailbox.py     # 도구 (publish / inbox / show / reply / hook / notify / watch)
 ├── docs/PROTOCOL.md             # 규약: 승인 범위, 필드, 상태, 알림, 전달 확인
 ├── templates/
 │   ├── HANDOVER.md              # 인수인계 문서 양식
