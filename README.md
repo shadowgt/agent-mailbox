@@ -26,9 +26,14 @@
 cp scripts/agent_mailbox.py <your-repo>/scripts/
 cp docs/PROTOCOL.md       <your-repo>/docs/
 
-# 2) 동작을 직접 본다 (임시 폴더에서 요청 → ack → accept → result → close)
+# 2) 환경·경로·하드링크·알림 CLI를 점검한다
+python <your-repo>/scripts/agent_mailbox.py --root <your-repo> doctor
+
+# 3) 동작을 직접 본다 (임시 폴더에서 요청 → ack → accept → result → close)
 python examples/demo.py
 ```
+
+> **한쪽 에이전트에만 작동하는 셸이 있을 때의 설치와 샌드박스 주의**: Codex 등 한 에이전트의 샌드박스가 깨져 명령을 실행하지 못할 때(예: Linux/WSL의 `bwrap: Operation not permitted`, Windows `workspace-write` 샌드박스 제한)는, 정상 셸이 있는 에이전트(예: Claude Code)나 사용자 터미널에서 파일 복사와 `doctor` 점검을 수행한다. **메일함을 설치한다고 상대 에이전트의 샌드박스 오류(`bwrap: Operation not permitted` 등)가 저절로 고쳐지지는 않는다.** 상대 에이전트가 `agent_mailbox.py`를 실행하거나 파일을 읽고 쓰려면 먼저 그 에이전트의 실행 환경·샌드박스 설정이 해결되어야 한다.
 
 3) 각 에이전트가 메일함을 보게 한다.
 
@@ -50,9 +55,28 @@ python scripts/agent_mailbox.py reply   --sender claude --session-id <SESSION_UU
 python scripts/agent_mailbox.py publish --file request.json                               # 새 요청·인계
 python scripts/agent_mailbox.py hook    < hook-payload.json                               # Claude Code 훅용
 python scripts/agent_mailbox.py publish --file request.json --notify                      # 게시 + Codex에 즉시 알림
-python scripts/agent_mailbox.py notify  --id <MESSAGE_UUID> [--dry-run]                    # 게시된 메시지를 Codex 스레드로 푸시
+python scripts/agent_mailbox.py notify  --id <MESSAGE_UUID> [--dry-run]                    # 게시된 메시지를 Codex 스레드로 푸시 (Codex 전용)
 python scripts/agent_mailbox.py watch   --recipient claude --session-id <SESSION_UUID>   # 새 메시지가 올 때까지 대기
+python scripts/agent_mailbox.py doctor                                                    # Python·루트·.agent-bridge·하드링크·CLI 점검
 ```
+
+## 네 가지 UUID 구분
+
+| 이름 | 뜻 | 쓰이는 곳 |
+|---|---|---|
+| **Claude session UUID** | Claude Code의 현재 대화 세션 식별자 | Claude의 `sender_session` / `recipient_session`, `inbox`/`reply`/`watch --session-id`, 훅 `session_id` |
+| **Codex thread UUID** | OpenAI Codex의 대화 스레드 식별자 (`codex resume` / `codex queue --thread` 대상) | Codex의 `sender_session` / `recipient_session`, `notify`의 `--thread` |
+| **agy conversation ID** | Antigravity CLI(`agy`)의 대화 식별자 (`last_conversations.json`, `agy_runs.jsonl`) | agy의 `sender_session` / `recipient_session`, `run_agy.ps1 -Resume` |
+| **Protocol `thread_id`** | 메일함 안에서 한 요청(`request`/`handoff`)과 그 후속 응답들을 묶는 **규약 전용 대화 묶음 UUID** | envelope의 `thread_id` 필드 (어떤 에이전트의 세션/스레드/대화 UUID와도 별개이며 `reply`가 그대로 이어받음) |
+
+## 양방향 핸드셰이크 점검 (4단계 분리 확인)
+
+설치 직후에는 아래 네 가지를 **따로따로** 확인해야 어디서 막혔는지 바로 알 수 있다.
+
+1. **공유 경로 접근 (Shared-path access)**: 양쪽 에이전트(또는 실행 환경)에서 같은 `<REPO_ROOT>`에 대해 `python scripts/agent_mailbox.py --root <REPO_ROOT> doctor`를 실행해 `PASS python`, `PASS root`, `PASS bridge`, `PASS hardlink`가 나오는지 확인한다.
+2. **게시 (Publication)**: 발신 에이전트가 `publish --file request.json`을 실행하고 `.agent-bridge/mailboxes/<recipient>/<MESSAGE_UUID>.json` 파일이 실제로 생겼는지(`show --id <MESSAGE_UUID>`) 확인한다(`POSTED`).
+3. **알림 (Notification)**: Codex 대상이면 `notify --id <MESSAGE_UUID>`(출력 `"queued": true`), Claude 대상이면 백그라운드 `watch` 또는 훅, agy 대상이면 `run_agy.ps1`로 깨움 신호가 전달되었는지 확인한다(`NOTIFICATION_QUEUED` — 아직 읽음 아님).
+4. **상대방 ACK (Peer ACK)**: 수신 에이전트가 자기 세션 ID로 `reply --sender <peer> --session-id <PEER_SESSION_UUID> --reply-to <MESSAGE_UUID> --kind ack --body-file ack.txt`를 게시하고, 발신 측이 `inbox --recipient <sender> --all`에서 그 `ack`를 확인한다(`ACKNOWLEDGED`).
 
 ## 즉시 전달 (push)
 
@@ -137,7 +161,7 @@ python scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-
 
 ```
 agent-mailbox/
-├── scripts/agent_mailbox.py     # 도구 (publish / inbox / show / reply / hook / notify / watch)
+├── scripts/agent_mailbox.py     # 도구 (publish / inbox / show / reply / hook / notify / watch / doctor)
 ├── docs/PROTOCOL.md             # 규약: 승인 범위, 필드, 상태, 알림, 전달 확인
 ├── templates/
 │   ├── HANDOVER.md              # 인수인계 문서 양식
