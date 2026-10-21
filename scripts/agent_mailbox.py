@@ -288,7 +288,12 @@ def publish(root: Path, item: Message) -> Path:
 
 
 def inbox(
-    root: Path, recipient: str, *, all_messages: bool = False, session_id: str | None = None
+    root: Path,
+    recipient: str,
+    *,
+    all_messages: bool = False,
+    session_id: str | None = None,
+    seen_invalid: set[str] | None = None,
 ) -> list[Message]:
     require(recipient in AGENTS, "invalid recipient")
     if session_id is not None:
@@ -297,14 +302,21 @@ def inbox(
     paths = sorted(
         path for party in AGENTS for path in bridge_path(root, f"mailboxes/{party}").glob("*.json")
     )
+    stem_counts: dict[str, int] = {}
+    for path in paths:
+        stem_counts[path.stem] = stem_counts.get(path.stem, 0) + 1
     messages: list[Message] = []
     for path in paths:
         try:
+            require(stem_counts[path.stem] == 1, "duplicate message id")
             item = validate_file(root, path)
             validate_reply(root, item)
         except (ValueError, OSError, TypeError, KeyError, RecursionError) as exc:
             rel = path.relative_to(resolved_root).as_posix()
-            print(f"agent mailbox: invalid message {rel}: {exc}", file=sys.stderr)
+            if seen_invalid is None or rel not in seen_invalid:
+                if seen_invalid is not None:
+                    seen_invalid.add(rel)
+                print(f"agent mailbox: invalid message {rel}: {exc}", file=sys.stderr)
             continue
         messages.append(item)
     answered = {item["reply_to"] for item in messages if item["reply_to"] is not None}
@@ -449,29 +461,24 @@ def agy_executable(explicit: str | None = None) -> str | None:
 
 def _doctor_fs_checks(root: Path) -> list[dict[str, str]]:
     checks: list[dict[str, str]] = []
-    root_ok = False
+    bridge_dir: Path | None = None
+    probe: Path | None = None
     try:
         require(root.is_dir(), f"{root} is not an existing directory")
-        fd, tmp = tempfile.mkstemp(prefix=".doctor-", suffix=".tmp", dir=root)
+        bridge_dir = relative_path(root, ".agent-bridge")
+        bridge_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".doctor-", suffix=".tmp", dir=bridge_dir)
         os.close(fd)
-        Path(tmp).unlink(missing_ok=True)
-        root_ok = True
+        probe = Path(tmp)
         checks.append({"check": "root", "status": "PASS", "detail": f"{root} is writable"})
+        checks.append({"check": "bridge", "status": "PASS", "detail": ".agent-bridge is ready"})
     except (ValueError, OSError) as exc:
+        bridge_dir = None
         checks.append({"check": "root", "status": "FAIL", "detail": str(exc)})
-    bridge_dir: Path | None = None
-    if root_ok:
-        try:
-            bridge_dir = relative_path(root, ".agent-bridge")
-            bridge_dir.mkdir(parents=True, exist_ok=True)
-            ignore = bridge_dir / ".gitignore"
-            if not ignore.exists():
-                ignore.write_bytes(b"*\n")
-            checks.append({"check": "bridge", "status": "PASS", "detail": ".agent-bridge is ready"})
-        except (ValueError, OSError) as exc:
-            checks.append({"check": "bridge", "status": "FAIL", "detail": str(exc)})
-    else:
         checks.append({"check": "bridge", "status": "FAIL", "detail": "root unavailable"})
+    finally:
+        if probe is not None:
+            probe.unlink(missing_ok=True)
     if bridge_dir is not None:
         src_path: Path | None = None
         dst_path: Path | None = None
@@ -481,8 +488,12 @@ def _doctor_fs_checks(root: Path) -> list[dict[str, str]]:
             src_path = Path(src_tmp)
             dst_path = bridge_dir / f".doctor-link-{uuid4().hex}.tmp"
             os.link(src_path, dst_path)
+            ignore = bridge_path(root, ".gitignore")
+            require(not ignore.is_symlink(), ".gitignore must not be a symlink")
+            if not ignore.exists():
+                atomic_publish(ignore, b"*\n")
             checks.append({"check": "hardlink", "status": "PASS", "detail": "os.link works"})
-        except OSError as exc:
+        except (ValueError, OSError) as exc:
             checks.append({"check": "hardlink", "status": "FAIL", "detail": str(exc)})
         finally:
             if dst_path is not None:
@@ -578,8 +589,9 @@ def watch(
     a watcher re-armed after handling a message waits for the next one."""
     deadline = now() + timeout
     who = session_id or "any"
+    seen_invalid: set[str] = set()
     while True:
-        for item in inbox(root, recipient, session_id=session_id):
+        for item in inbox(root, recipient, session_id=session_id, seen_invalid=seen_invalid):
             marker = bridge_path(root, f"notifications/{who}/{item['id']}.watched")
             if not marker.exists():
                 atomic_publish(marker, b"watch\n")
@@ -635,12 +647,12 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    if args.command == "doctor":
-        checks = doctor(args.root, codex=args.codex)
-        for entry in checks:
-            print(f"{entry['status']} {entry['check']}: {entry['detail']}")
-        return 1 if any(entry["status"] == "FAIL" for entry in checks) else 0
     try:
+        if args.command == "doctor":
+            checks = doctor(args.root, codex=args.codex)
+            for entry in checks:
+                print(f"{entry['status']} {entry['check']}: {entry['detail']}")
+            return 2 if any(entry["status"] == "FAIL" for entry in checks) else 0
         if args.command == "hook":
             raw = sys.stdin.read(MAX_BYTES + 1)
             require(len(raw.encode("utf-8")) <= MAX_BYTES, "hook input too large")

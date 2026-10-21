@@ -74,7 +74,7 @@ UTF-8 JSON 파일 하나가 메시지 하나다. `publish`가 검증한 뒤 임�
 
 도구가 거부하는 것: 저장소 밖 경로, `..`, 역슬래시·드라이브 경로, `.git`·`.env*`, 제어 문자, UTC가 아닌 시각, 128 KB 초과, 응답이 원 메시지의 스레드·작업·기준 커밋·범위를 바꾸는 것, ACK·reject·close에 대한 응답, 부모 메시지가 없거나 손상된 응답(`reply parent <ID> is missing` / `reply parent <ID> is invalid: ...`).
 
-`inbox`, `watch`, `hook`은 메일함 안의 각 파일을 개별 검증한다. 깨진 JSON, 스키마 불일치, 잘못된 폴더(`recipient`와 폴더 불일치), 변조된 응답 파일이 있어도 정상 메시지의 수신·알림을 막지 않으며, 잘못된 파일은 `stdout` JSON 목록 모양을 그대로 유지한 채 `stderr`에 `agent mailbox: invalid message <path>: <reason>` 한 줄씩 별도 보고한다. `hook` 알림 문구는 저장소의 `docs/PROTOCOL.md`를 가리키며, 해당 파일이 없고 `docs/agent_handoff_protocol.md`만 있는 저장소에서는 그 경로를 가리킨다.
+`inbox`, `watch`, `hook`은 메일함 안의 각 파일을 개별 검증한다. 깨진 JSON, 스키마 불일치, 잘못된 폴더(`recipient`와 폴더 불일치), 여러 파티 메일함에 중복된 메시지 ID(`duplicate message id`), 변조된 응답 파일이 있어도 정상 메시지의 수신·알림을 막지 않으며, 잘못된 파일은 `stdout` JSON 목록 모양을 그대로 유지한 채 `stderr`에 `agent mailbox: invalid message <path>: <reason>` 한 줄씩 별도 보고한다(`watch`는 한 번의 대기 실행 동안 같은 잘못된 파일 경로를 한 번만 보고한다). `hook` 알림 문구는 저장소의 `docs/PROTOCOL.md`를 가리키며, 해당 파일이 없고 `docs/agent_handoff_protocol.md`만 있는 저장소에서는 그 경로를 가리킨다.
 
 작업 요청 본문에는 목적, **사용자 승인 근거**, 허용 파일, 수정 금지 대상, 원하는 산출물, 검증 방법, 기한을 적는다. 정정은 새 ID와 `reply_to`로 이전 내용을 참조하고 무엇을 대체하는지 밝힌다.
 
@@ -117,7 +117,7 @@ python scripts/agent_mailbox.py reply --sender claude --session-id <CLAUDE_SESSI
 # 새 요청·인계는 전체 envelope JSON을 만들어 게시 (examples/envelopes 참고)
 python scripts/agent_mailbox.py publish --file request.json
 
-# 환경·루트·.agent-bridge·하드링크·알림 CLI 점검 (필수 항목 통과 시 종료 코드 0, 아니면 1; CLI 미설치는 WARN)
+# 환경·루트·.agent-bridge·하드링크·알림 CLI 점검 (필수 항목 모두 통과 시 종료 코드 0, 필수 항목 실패 시 2; CLI 미설치는 WARN이며 실패하지 않음)
 python scripts/agent_mailbox.py doctor
 ```
 
@@ -135,10 +135,11 @@ python scripts/agent_mailbox.py doctor
 ### 6a. Antigravity (`agy`) 연동
 
 - **비대화형이 기본(`templates/run_agy.ps1`)**: Claude는 메일함에 요청을 게시한 뒤 전용 홈 폴더(`<AGY_HOME>`, 예: `C:\agy\<project>`)에서 `templates/run_agy.ps1 -Task <지시문 파일> -Label <이름> -RepoRoot <REPO_ROOT> [-AgyHome <AGY_HOME>] [-Resume <대화 ID>]`를 실행해 `agy -p`를 한 작업씩 돌린다.
+- **지시문 본문은 명령줄에 넣지 않음(따옴표 안전)**: Windows PowerShell 5.1은 네이티브 실행 파일 호출 시 인자 내부의 큰따옴표(`"`)를 이스케이프하지 않는다. 그래서 `run_agy.ps1`은 `Set-Location` 전에 `-Task`를 절대 경로로 해석하고(`"`가 포함된 경로는 거부), 지시문 내용을 명령줄에 올리지 않은 채 `Read the task file at <절대 경로> and follow it exactly.`라는 따옴표 없는 짧은 프롬프트만 `-p`에 전달한다. 따라서 지시문 파일에는 어떤 문자(큰따옴표, 코드 블록 등)가 들어 있어도 안전하다.
 - **대화형 폴백(fallback)**: 대화형 `agy` 창이 꼭 필요한 경우, Claude가 사용자에게 붙여 넣을 메시지를 작성해 건네고 사용자가 열린 `agy` 창에 직접 붙여 넣는다. Claude는 열린 `agy` 대화를 직접 조작하지 않는다.
 - **`--dangerously-skip-permissions`와 금지 사항 명시**: 비대화형 실행은 권한 확인을 물을 수 없어 `--dangerously-skip-permissions`를 사용한다. 즉 작업 범위가 기술적 샌드박스가 아니라 **지침(`templates/GEMINI.md`)과 작업 지시문**으로 유지되므로, 모든 지시문에는 **금지 행동**(공유 체크아웃 파일 수정·브랜치 전환 금지, 실행 중 프로세스·스케줄 조작 금지, `.env`·키 열람 금지, 프로젝트별 금지 사항)을 반드시 적어야 한다. 개발(`scope.mode = implementation`)을 맡길 때는 `<AGY_HOME>\wt-*` 아래의 전용 git worktree(`agy/*` 브랜치)에서만 커밋하게 하고(push·머지·PR 금지), 실행 뒤 Claude가 공유 체크아웃의 `git status`를 확인한다.
 - **열린 대화 재진입 금지**: 현재 열려 있는 대화(`presence/<ID>.lock`이 있는 동안)를 동시에 다시 열지 않는다. `-Resume <대화 ID>`는 **이미 끝난 비대화형 대화**에서 같은 주제의 후속 작업을 이어 갈 때만 사용한다.
-- **실행 간 기억 유지**: `<AGY_HOME>/GEMINI.md`가 `@[project context](CONTEXT.md)`(Claude가 관리, agy는 읽기 전용)를 불러오고, `agy`는 매 실행 시작에 `VERIFICATION_LOG.md`를 읽고 끝에 한 항목을 추가하며, `run_agy.ps1`은 `last_conversations.json`에서 대화 ID를 읽어 `agy_runs.jsonl`에 기록한다.
+- **실행 간 기억 및 로그 유지**: `<AGY_HOME>/GEMINI.md`가 `@[project context](CONTEXT.md)`(Claude가 관리, agy는 읽기 전용)를 불러오고, `agy`는 매 실행 시작에 `VERIFICATION_LOG.md`를 읽고 끝에 한 항목을 추가하며, `run_agy.ps1`은 전체 출력을 `agy_run_<label>_<timestamp>.log`에 저장하고(화면에는 마지막 15줄 출력) `last_conversations.json`에서 대화 ID를 읽어 `agy_runs.jsonl`에 기록한다.
 - **`agy`의 회신(`reply --sender agy`)**: `agy`는 공유 저장소를 `--root <REPO_ROOT>`로 지정하고 회신 본문은 `<AGY_HOME>`에 쓴 뒤 `reply --sender agy`로 답한다(단발 비대화형 실행에서는 `ack`를 생략하고 `result` 하나만 남겨도 된다):
 
 ```powershell

@@ -187,6 +187,24 @@ def test_watch_returns_a_new_message_once_and_times_out_otherwise(tmp_path: Path
     assert again is None  # the same message never wakes the same watcher twice
 
 
+def test_watch_reports_each_invalid_file_only_once_per_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    claude_box = tmp_path / ".agent-bridge/mailboxes/claude"
+    claude_box.mkdir(parents=True)
+    bad_file = claude_box / f"{mailbox.uuid4()}.json"
+    bad_file.write_text("{broken json", encoding="utf-8")
+    clock = [0.0]
+
+    def tick(seconds: float) -> None:
+        clock[0] += seconds
+
+    found = mailbox.watch(tmp_path, "claude", timeout=3, poll=1, now=lambda: clock[0], sleep=tick)
+    assert found is None and clock[0] >= 3
+    err_lines = [line for line in capsys.readouterr().err.splitlines() if "invalid message" in line]
+    assert len(err_lines) == 1
+
+
 def test_watch_wakes_when_another_process_publishes(tmp_path: Path) -> None:
     item = message(recipient_session=CLAUDE_SESSION)
     timer = threading.Timer(0.3, lambda: mailbox.publish(tmp_path, item))
@@ -251,6 +269,7 @@ def test_doctor_passes_with_mocked_binaries_and_warns_when_clis_missing(
     assert len(out) == 6
     assert all(line.startswith("PASS ") for line in out)
     assert not list(repo.rglob(".doctor-*"))
+    assert (repo / ".agent-bridge/.gitignore").read_text(encoding="utf-8") == "*\n"
 
     monkeypatch.delenv(mailbox.CODEX_ENV)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty_localapp"))
@@ -267,32 +286,129 @@ def test_doctor_passes_with_mocked_binaries_and_warns_when_clis_missing(
     }
 
 
-def test_doctor_fails_when_required_checks_fail(
+def test_doctor_fails_with_exit_code_2_when_required_checks_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(mailbox.shutil, "which", lambda name: None)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
 
     missing_root = tmp_path / "does-not-exist"
-    assert mailbox.main(["--root", str(missing_root), "doctor"]) == 1
+    assert mailbox.main(["--root", str(missing_root), "doctor"]) == 2
     out = capsys.readouterr().out
     assert "FAIL root:" in out
 
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr(mailbox.sys, "version_info", (3, 11, 8, "final", 0))
-    assert mailbox.main(["--root", str(repo), "doctor"]) == 1
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 2
     assert "FAIL python:" in capsys.readouterr().out
 
     monkeypatch.undo()
     monkeypatch.setattr(mailbox.shutil, "which", lambda name: None)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
 
+    seen_dirs: list[Path] = []
+    real_mkstemp = mailbox.tempfile.mkstemp
+
+    def tracking_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        if "dir" in kwargs and kwargs["dir"] is not None:
+            seen_dirs.append(Path(kwargs["dir"]))
+        fd, name = real_mkstemp(*args, **kwargs)
+        return int(fd), str(name)
+
+    monkeypatch.setattr(mailbox.tempfile, "mkstemp", tracking_mkstemp)
+
     def broken_link(src: Path, dst: Path) -> None:
         raise OSError("hard links disabled")
 
     monkeypatch.setattr(mailbox.os, "link", broken_link)
-    assert mailbox.main(["--root", str(repo), "doctor"]) == 1
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 2
     link_out = capsys.readouterr().out
     assert "PASS bridge:" in link_out and "FAIL hardlink:" in link_out
+    assert all(d == repo / ".agent-bridge" for d in seen_dirs)
     assert not list(repo.rglob(".doctor-*"))
+
+    def explode(*_args: Any, **_kwargs: Any) -> list[dict[str, str]]:
+        raise OSError("unexpected failure")
+
+    monkeypatch.setattr(mailbox, "doctor", explode)
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 2
+    assert "invalid input or unavailable local mailbox" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(mailbox.os.name != "nt", reason="PowerShell wrapper test for Windows")
+def test_run_agy_ps1_passes_path_prompt_saves_full_log_and_rejects_quoted_path(
+    tmp_path: Path,
+) -> None:
+    script = Path(__file__).resolve().parents[1] / "templates/run_agy.ps1"
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    agy_home = tmp_path / "agy_home"
+    agy_home.mkdir()
+    task_file = caller_dir / "task_quoted.txt"
+    task_file.write_text('Task with "double quotes" and --unexpected-flag\n', encoding="utf-8")
+
+    fake_agy = tmp_path / "fake_agy.cmd"
+    fake_agy.write_text(
+        "@echo off\r\nfor /L %%i in (1,1,20) do echo line-%%i\r\necho prompt-arg=%~2\r\n",
+        encoding="utf-8",
+    )
+    conv_map = tmp_path / "last_conversations.json"
+    conv_id = "77777777-7777-4777-8777-777777777777"
+    conv_map.write_text(mailbox.json.dumps({str(agy_home): conv_id}), encoding="utf-8")
+
+    done = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-File",
+            str(script),
+            "-Task",
+            "task_quoted.txt",
+            "-Label",
+            "review-fix",
+            "-AgyHome",
+            str(agy_home),
+            "-AgyExe",
+            str(fake_agy),
+            "-ConversationMap",
+            str(conv_map),
+        ],
+        cwd=caller_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert f"Read the task file at {task_file} and follow it exactly." in done.stdout
+    assert "double quotes" not in done.stdout
+    assert "line-1\n" not in done.stdout and "line-20" in done.stdout
+
+    logs = list(agy_home.glob("agy_run_review-fix_*.log"))
+    assert len(logs) == 1
+    full_log = logs[0].read_text(encoding="utf-8")
+    assert "line-1" in full_log and "line-20" in full_log
+
+    bad = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-File",
+            str(script),
+            "-Task",
+            'bad"path.txt',
+            "-Label",
+            "bad",
+            "-AgyHome",
+            str(agy_home),
+            "-AgyExe",
+            str(fake_agy),
+        ],
+        cwd=caller_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert bad.returncode != 0

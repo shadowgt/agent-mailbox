@@ -374,6 +374,18 @@ def test_invalid_files_are_reported_to_stderr_without_blocking_inbox_watch_or_ho
     assert "unsupported version" in err
     assert "misfiled message" in err
 
+    dup_id = str(uuid4())
+    dup_claude = message(id=dup_id, sender="codex", recipient="claude")
+    dup_codex = message(id=dup_id, sender="claude", recipient="codex")
+    codex_box = tmp_path / ".agent-bridge/mailboxes/codex"
+    codex_box.mkdir(parents=True, exist_ok=True)
+    (claude_box / f"{dup_id}.json").write_text(json.dumps(dup_claude), encoding="utf-8")
+    (codex_box / f"{dup_id}.json").write_text(json.dumps(dup_codex), encoding="utf-8")
+    assert mailbox.inbox(tmp_path, "claude") == [valid]
+    assert mailbox.inbox(tmp_path, "codex") == []
+    dup_err = capsys.readouterr().err
+    assert dup_err.count("duplicate message id") >= 2
+
     assert mailbox.main(["--root", str(tmp_path), "inbox", "--recipient", "claude"]) == 0
     cli = capsys.readouterr()
     assert json.loads(cli.out) == [valid]
