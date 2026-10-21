@@ -26,7 +26,7 @@
 cp scripts/agent_mailbox.py <your-repo>/scripts/
 cp docs/PROTOCOL.md       <your-repo>/docs/
 
-# 2) 환경·경로·하드링크·알림 CLI를 점검한다
+# 2) 환경·경로·하드링크·알림 CLI를 점검한다 (.agent-bridge/ 와 .gitignore를 생성·확인; 필수 통과 시 종료 코드 0, 실패 시 2; CLI 미설치는 WARN이며 실패하지 않음)
 python <your-repo>/scripts/agent_mailbox.py --root <your-repo> doctor
 
 # 3) 동작을 직접 본다 (임시 폴더에서 요청 → ack → accept → result → close)
@@ -57,8 +57,10 @@ python scripts/agent_mailbox.py hook    < hook-payload.json                     
 python scripts/agent_mailbox.py publish --file request.json --notify                      # 게시 + Codex에 즉시 알림
 python scripts/agent_mailbox.py notify  --id <MESSAGE_UUID> [--dry-run]                    # 게시된 메시지를 Codex 스레드로 푸시 (Codex 전용)
 python scripts/agent_mailbox.py watch   --recipient claude --session-id <SESSION_UUID>   # 새 메시지가 올 때까지 대기
-python scripts/agent_mailbox.py doctor                                                    # Python·루트·.agent-bridge·하드링크·CLI 점검
+python scripts/agent_mailbox.py doctor                                                    # 환경·.agent-bridge·하드링크·CLI 점검 (성공 0 / 필수 실패 2, WARN은 통과)
 ```
+
+`doctor`는 `.agent-bridge/` 폴더와 `.agent-bridge/.gitignore`(`*`, 하드링크 원자 게시)를 안전하게 만들고, `.agent-bridge/` 안에서 쓰기·하드링크 임시 파일을 시험한 뒤 `finally`에서 지운다. 필수 점검(`python`, `root`, `bridge`, `hardlink`)이 모두 통과하면 종료 코드 `0`, 하나라도 실패(`FAIL`)하면 다른 명령과 같이 종료 코드 `2`를 반환한다(`codex`/`agy` 미설치는 `WARN`이며 실패로 치지 않는다).
 
 ## 네 가지 UUID 구분
 
@@ -109,14 +111,15 @@ python scripts/agent_mailbox.py watch --recipient claude --session-id <CLAUDE_SE
 ## Antigravity (`agy`) 연동과 선택 파티 (`local`)
 
 - **비대화형이 기본(`templates/run_agy.ps1`)**: `agy` CLI에는 열린 대화에 푸시하는 `queue` 명령이 없다. 따라서 Claude가 메일함에 요청을 게시한 뒤 `run_agy.ps1 -Task <지시문 파일> -Label <이름> -RepoRoot <공유 저장소> [-AgyHome <agy 홈 폴더>] [-Resume <대화 ID>]`로 비대화형(`agy -p`) 실행한다.
+- **작업 지시문은 명령줄에 넣지 않음(따옴표·특수문자 안전)**: Windows PowerShell 5.1은 네이티브 실행 파일에 인자를 넘길 때 문자열 안의 큰따옴표(`"`)를 이스케이프하지 않아 인자가 쪼개진다. 그래서 `run_agy.ps1`은 `Set-Location` 전에 `-Task` 경로를 절대 경로로 먼저 해석하고(경로 자체에 `"`가 있으면 거부), 지시문 본문을 명령줄에 올리는 대신 따옴표 없는 짧은 프롬프트(`Read the task file at <절대 경로> and follow it exactly.`)만 `-p`로 넘긴다. 따라서 **지시문 파일(`task_*.txt`) 안에는 큰따옴표나 어떤 문자가 들어 있어도 안전하다.**
 - **대화형 폴백(fallback)**: 대화형 `agy` 창이 꼭 필요하면 Claude가 사용자에게 붙여 넣을 안내 문구를 작성해 전달하고, 사용자가 열린 `agy` 창에 직접 붙여 넣는다(Claude는 열린 대화를 직접 건드리지 않는다).
 - **지시로 지키는 범위(`--dangerously-skip-permissions`)**: 비대화형 실행은 권한 확인 프롬프트를 띄울 수 없어 `--dangerously-skip-permissions`를 쓴다. 즉 파일·명령 범위가 샌드박스가 아니라 **지침(`GEMINI.md`)과 작업 지시문**으로 유지되므로, 모든 지시문에는 **금지 행동**(공유 체크아웃 수정·브랜치 변경 금지, 프로세스/스케줄 조작 금지, `.env`/키 열람 금지, 프로젝트별 금지 사항)을 명시해야 하며, 개발 작업은 전용 git worktree(`<AGY_HOME>\wt-*`)로만 제한한다.
 - **열린 대화 재진입 금지**: 열려 있는 `agy` 대화(`presence/<ID>.lock`이 존재하는 상태)를 동시에 다시 열지 않는다. `-Resume <대화 ID>`는 **이미 종료된 비대화형 대화**에서 같은 주제의 후속 작업을 이어 갈 때만 쓴다.
-- **기억 유지**: `<AGY_HOME>`의 `GEMINI.md`(상시 규칙), `CONTEXT.md`(Claude가 갱신하는 현황), `VERIFICATION_LOG.md`(매 실행 끝에 추가하는 작업 기록), `agy_runs.jsonl`(`last_conversations.json`에서 추출한 대화 ID 색인)로 실행 간 맥락을 유지한다.
+- **기억 및 전체 로그 유지**: `<AGY_HOME>`의 `GEMINI.md`(상시 규칙), `CONTEXT.md`(Claude가 갱신하는 현황), `VERIFICATION_LOG.md`(매 실행 끝에 추가하는 작업 기록), `agy_runs.jsonl`(`last_conversations.json`에서 추출한 대화 ID 색인)로 실행 간 맥락을 유지한다. `run_agy.ps1`은 매 실행의 전체 출력을 `agy_runs.jsonl` 옆의 `agy_run_<label>_<timestamp>.log` 파일에 저장하고 화면에는 마지막 15줄만 출력한다.
 - **`agy`의 회신 방법**: `agy`는 공유 저장소를 `--root`로 지정하고 `--sender agy`로 회신한다(본문 파일은 `<AGY_HOME>`에 작성):
 
 ```powershell
-python scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-id <AGY_CONVERSATION_UUID> \
+python scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-id <AGY_CONVERSATION_UUID> `
     --reply-to <MESSAGE_UUID> --kind result --body-file <AGY_HOME>/result.txt
 ```
 
