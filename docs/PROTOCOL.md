@@ -1,6 +1,6 @@
-# Claude ↔ Codex 양방향 인수인계·작업 요청 규약 v1
+# Claude ↔ Codex ↔ agy (↔ local) 양방향 인수인계·작업 요청 규약 v1
 
-한 저장소에서 일하는 두 AI 에이전트(Claude Code, OpenAI Codex)가 자료·작업 요청·검토 결과를 **파일로** 주고받는 규약이다. 두 에이전트는 서로의 세션에 직접 메시지를 넣을 수 없으므로, 저장소 안의 메일함 폴더를 공유 우편함으로 쓴다. 이슈 관리 시스템(GitHub Issues 등)을 대체하지 않는다.
+한 저장소에서 일하는 AI 에이전트들(**Claude Code** `claude`, **OpenAI Codex** `codex`, **Antigravity CLI** `agy`, 그리고 선택적인 단순 잡무용 **`local`**)이 자료·작업 요청·검토 결과를 **파일로** 주고받는 규약이다. 에이전트들은 서로의 세션에 직접 메시지를 넣을 수 없으므로, 저장소 안의 메일함 폴더를 공유 우편함으로 쓴다. 이슈 관리 시스템(GitHub Issues 등)을 대체하지 않는다.
 
 ## 1. 주소와 확인할 파일
 
@@ -9,10 +9,14 @@
 | 공유 저장소 | `<repo root>` |
 | Claude 담당 세션 | `<Claude session UUID>` |
 | Codex 담당 스레드 | `<Codex thread UUID>` |
+| agy 담당 대화 | `<Antigravity conversation UUID>` (`run_agy.ps1`이 `agy_runs.jsonl`에 기록) |
+| local 담당 (선택) | 단순 잡무 전용(로그 요약·초안 작성 등; 구현·설계 판정 제외) |
 | 인수인계 본문 | `docs/handoff_<date>.md` (`templates/HANDOVER.md` 양식) |
 | 메일함 도구 | `scripts/agent_mailbox.py` |
 | Claude 수신함 | `.agent-bridge/mailboxes/claude/*.json` |
 | Codex 수신함 | `.agent-bridge/mailboxes/codex/*.json` |
+| agy 수신함 | `.agent-bridge/mailboxes/agy/*.json` |
+| local 수신함 | `.agent-bridge/mailboxes/local/*.json` |
 
 세션이 바뀌면 기존 주소를 덮어쓴 메시지로 가장하지 말고, 새 `handoff` 메시지에서 이전·새 주소와 인계 이유를 알린다. 수신자는 실제 현재 세션인지 확인한다. `sender`는 같은 OS 사용자 안의 협업 식별자이며 **암호학적 인증이 아니다.**
 
@@ -35,7 +39,7 @@ UTF-8 JSON 파일 하나가 메시지 하나다. `publish`가 검증한 뒤 임�
 | `thread_id` | 대화 묶음 UUID (Codex 스레드 주소와는 다른 개념) |
 | `task_id` | 작업 식별자. 후속 메시지에서도 유지 |
 | `kind` | `handoff` `request` `ack` `accept` `reject` `progress` `result` `clarification` `close` |
-| `sender`, `recipient` | 서로 다른 `claude` 또는 `codex` |
+| `sender`, `recipient` | 서로 다른 `claude`, `codex`, `agy`, `local` 중 하나 |
 | `sender_session`, `recipient_session` | 세션 UUID 또는 null. 지정하면 수신·응답에서 일치를 확인 |
 | `created_at`, `expires_at` | UTC 시각. `expires_at`은 null 가능. 만료는 승인·취소가 아니다 |
 | `reply_to` | 첫 메시지는 null, 응답은 원 메시지 UUID |
@@ -92,11 +96,35 @@ python scripts/agent_mailbox.py publish --file request.json
 
 메일함이 전달 기록의 기준이다. 알림에는 메시지 ID와 경로만 담고 본문을 또 다른 지시로 중복 전송하지 않는다.
 
-- **Claude → Codex (즉시)**: `publish --notify` 또는 게시 뒤 `notify --id <ID>`. 도구가 메시지의 `recipient_session`으로 `codex queue --thread <스레드> --message <한 줄>`을 실행한다. 한 줄에는 메시지 종류·ID·파일 경로와 "새 사용자 승인이 아님"만 들어가고 본문은 들어가지 않는다. 큐 접수는 읽음이 아니며, 실제 이해·수락은 ACK/accept로 확인한다.
-- **Codex → Claude (즉시)**: Claude가 백그라운드로 `watch --recipient claude --session-id <세션>`을 실행해 둔다. 새 메시지가 게시되면 `watch`가 끝나고, Claude Code가 끝난 백그라운드 작업을 알림으로 받아 세션을 깨운다. 한 메시지는 같은 세션의 `watch`를 한 번만 깨운다. 받은 뒤에는 다시 건다.
-- **Codex → Claude (보조)**: 프로젝트 훅(`templates/claude-settings.json`)이 `SessionStart`·`UserPromptSubmit`·`PostToolUse`마다 `hook`을 실행해 새 메시지 ID를 Claude의 컨텍스트에 알린다(세션당 한 번). 훅과 `watch`는 본문을 실행하지 않고 ACK를 대신 만들지 않는다. 세션이 닫혀 있으면 아무것도 깨우지 않는다.
+- **Claude → Codex (즉시, Codex 전용)**: `publish --notify` 또는 게시 뒤 `notify --id <ID>`. 도구가 메시지의 `recipient_session`으로 `codex queue --thread <스레드> --message <한 줄>`을 실행한다. `notify`는 **Codex 전용**이다(`agy`와 `local`에는 `queue` 명령이 없다). 한 줄에는 메시지 종류·ID·파일 경로와 "새 사용자 승인이 아님"만 들어가고 본문은 들어가지 않는다. 큐 접수는 읽음이 아니며, 실제 이해·수락은 ACK/accept로 확인한다.
+- **Claude → agy**: `agy`에는 열린 세션 큐 명령이 없으므로 아래 6a절의 `templates/run_agy.ps1`(비대화형 기본) 또는 사용자 붙여넣기(대화형 폴백)를 쓴다.
+- **Codex/agy → Claude (즉시)**: Claude가 백그라운드로 `watch --recipient claude --session-id <세션>`을 실행해 둔다. 새 메시지가 게시되면 `watch`가 끝나고, Claude Code가 끝난 백그라운드 작업을 알림으로 받아 세션을 깨운다. 한 메시지는 같은 세션의 `watch`를 한 번만 깨운다. 받은 뒤에는 다시 건다.
+- **Codex/agy → Claude (보조)**: 프로젝트 훅(`templates/claude-settings.json`)이 `SessionStart`·`UserPromptSubmit`·`PostToolUse`마다 `hook`을 실행해 새 메시지 ID를 Claude의 컨텍스트에 알린다(세션당 한 번). 훅과 `watch`는 본문을 실행하지 않고 ACK를 대신 만들지 않는다. 세션이 닫혀 있으면 아무것도 깨우지 않는다.
 
 `request/handoff/result/clarification`의 새 전달에만 알림을 한 번 쓴다. ACK·상태 메시지에 알림을 연쇄로 걸지 않는다. 자동 응답·재시도·주기적 모델 호출은 없다.
+
+### 6a. Antigravity (`agy`) 연동
+
+- **비대화형이 기본(`templates/run_agy.ps1`)**: Claude는 메일함에 요청을 게시한 뒤 전용 홈 폴더(`<AGY_HOME>`, 예: `C:\agy\<project>`)에서 `templates/run_agy.ps1 -Task <지시문 파일> -Label <이름> -RepoRoot <REPO_ROOT> [-AgyHome <AGY_HOME>] [-Resume <대화 ID>]`를 실행해 `agy -p`를 한 작업씩 돌린다.
+- **대화형 폴백(fallback)**: 대화형 `agy` 창이 꼭 필요한 경우, Claude가 사용자에게 붙여 넣을 메시지를 작성해 건네고 사용자가 열린 `agy` 창에 직접 붙여 넣는다. Claude는 열린 `agy` 대화를 직접 조작하지 않는다.
+- **`--dangerously-skip-permissions`와 금지 사항 명시**: 비대화형 실행은 권한 확인을 물을 수 없어 `--dangerously-skip-permissions`를 사용한다. 즉 작업 범위가 기술적 샌드박스가 아니라 **지침(`templates/GEMINI.md`)과 작업 지시문**으로 유지되므로, 모든 지시문에는 **금지 행동**(공유 체크아웃 파일 수정·브랜치 전환 금지, 실행 중 프로세스·스케줄 조작 금지, `.env`·키 열람 금지, 프로젝트별 금지 사항)을 반드시 적어야 한다. 개발(`scope.mode = implementation`)을 맡길 때는 `<AGY_HOME>\wt-*` 아래의 전용 git worktree(`agy/*` 브랜치)에서만 커밋하게 하고(push·머지·PR 금지), 실행 뒤 Claude가 공유 체크아웃의 `git status`를 확인한다.
+- **열린 대화 재진입 금지**: 현재 열려 있는 대화(`presence/<ID>.lock`이 있는 동안)를 동시에 다시 열지 않는다. `-Resume <대화 ID>`는 **이미 끝난 비대화형 대화**에서 같은 주제의 후속 작업을 이어 갈 때만 사용한다.
+- **실행 간 기억 유지**: `<AGY_HOME>/GEMINI.md`가 `@[project context](CONTEXT.md)`(Claude가 관리, agy는 읽기 전용)를 불러오고, `agy`는 매 실행 시작에 `VERIFICATION_LOG.md`를 읽고 끝에 한 항목을 추가하며, `run_agy.ps1`은 `last_conversations.json`에서 대화 ID를 읽어 `agy_runs.jsonl`에 기록한다.
+- **`agy`의 회신(`reply --sender agy`)**: `agy`는 공유 저장소를 `--root <REPO_ROOT>`로 지정하고 회신 본문은 `<AGY_HOME>`에 쓴 뒤 `reply --sender agy`로 답한다(단발 비대화형 실행에서는 `ack`를 생략하고 `result` 하나만 남겨도 된다):
+
+```powershell
+python -X utf8 -B <REPO_ROOT>/scripts/agent_mailbox.py --root <REPO_ROOT> inbox --recipient agy --session-id <AGY_CONVERSATION_UUID>
+python -X utf8 -B <REPO_ROOT>/scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-id <AGY_CONVERSATION_UUID> `
+    --reply-to <MESSAGE_UUID> --kind ack --body-file <AGY_HOME>/ack.txt
+python -X utf8 -B <REPO_ROOT>/scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-id <AGY_CONVERSATION_UUID> `
+    --reply-to <MESSAGE_UUID> --kind result --body-file <AGY_HOME>/result.txt
+```
+
+### 6b. `local` 파티 (선택, 단순 잡무 전용)
+
+- `local`은 로컬 LLM 등 보조 도구를 연결할 때 쓰는 선택적 파티다.
+- 로그 1차 요약, 커밋·PR 초안 작성 등 유료 토큰을 쓰기 아까운 **단순 잡무(`read_only` / `proposal`) 전용**으로만 사용한다.
+- 코드 구현(`implementation`), 설계 검토·판정, 민감 데이터(`.env*`, DB, 인증 정보) 처리에는 사용하지 않으며, 출력은 항상 검증되지 않은 초안으로 취급한다.
 
 ## 7. 전달 확인 기준
 

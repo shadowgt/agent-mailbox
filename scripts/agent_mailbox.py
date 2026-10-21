@@ -19,7 +19,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 Message = dict[str, Any]
-AGENTS = ("claude", "codex")
+AGENTS = ("claude", "codex", "agy", "local")
 KINDS = {
     "handoff",
     "request",
@@ -415,11 +415,14 @@ def notify(
 ) -> Message:
     """Push a published message to the Codex thread it names (one ``codex queue`` call).
 
-    Queuing is delivery, not reading: the receiver still ACKs. Messages to Claude have no
-    push channel here; Claude sees them through the hook or a ``watch`` it is running."""
+    Queuing is delivery, not reading: the receiver still ACKs. Push is Codex-only (``agy``
+    and ``local`` have no queue command; Claude uses the hook or ``watch``)."""
     item = show(root, message_id)
-    if item["recipient"] == "claude":
-        return {"queued": False, "reason": "no push to claude: use the hook or watch"}
+    if item["recipient"] != "codex":
+        if item["recipient"] == "claude":
+            return {"queued": False, "reason": "no push to claude: use the hook or watch"}
+        reason = f"no push to {item['recipient']}: notify is Codex-only (agy has no queue command)"
+        return {"queued": False, "reason": reason}
     argv = notify_argv(root, item, codex or ("codex" if dry_run else codex_executable()))
     if dry_run:
         return {"queued": False, "dry_run": True, "argv": argv}
@@ -462,7 +465,11 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     posting = commands.add_parser("publish")
     posting.add_argument("--file", type=Path, required=True)
-    posting.add_argument("--notify", action="store_true", help="also run codex queue")
+    posting.add_argument(
+        "--notify",
+        action="store_true",
+        help="also run codex queue (Codex only; agy has no queue command)",
+    )
     posting.add_argument("--codex", help="codex CLI path (default: $AGENT_MAILBOX_CODEX, PATH)")
     listing = commands.add_parser("inbox")
     listing.add_argument("--recipient", choices=AGENTS, required=True)
@@ -476,7 +483,11 @@ def parser() -> argparse.ArgumentParser:
     response.add_argument("--body-file", type=Path, required=True)
     response.add_argument("--session-id")
     commands.add_parser("hook")
-    pushing = commands.add_parser("notify", help="push a message to its Codex thread")
+    pushing = commands.add_parser(
+        "notify",
+        help="push a message to its Codex thread (Codex only; agy has no queue command)",
+        description="Push a message to its Codex thread (Codex only; agy has no queue command).",
+    )
     pushing.add_argument("--id", required=True)
     pushing.add_argument("--codex", help="codex CLI path (default: $AGENT_MAILBOX_CODEX, PATH)")
     pushing.add_argument("--dry-run", action="store_true", help="print the command only")

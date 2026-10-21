@@ -1,12 +1,12 @@
-# agent-mailbox — Claude Code ↔ Codex 파일 메일함
+# agent-mailbox — Claude Code ↔ Codex ↔ Antigravity(agy) 파일 메일함
 
-한 저장소에서 함께 일하는 **Claude Code**와 **OpenAI Codex**가 인수인계·작업 요청·검토 결과를 주고받는 작은 도구와 규약이다. 두 에이전트는 서로의 세션에 직접 말을 걸 수 없다. 그래서 저장소 안의 `.agent-bridge/mailboxes/{claude,codex}/` 폴더를 공유 우편함으로 쓰고, 메시지마다 검증된 JSON 파일 하나를 남긴다.
+한 저장소에서 함께 일하는 **Claude Code**(`claude`), **OpenAI Codex**(`codex`), **Antigravity CLI**(`agy`), 그리고 선택적인 로컬 보조(`local`)가 인수인계·작업 요청·검토 결과를 주고받는 작은 도구와 규약이다. 에이전트들은 서로의 세션에 직접 말을 걸 수 없다. 그래서 저장소 안의 `.agent-bridge/mailboxes/{claude,codex,agy,local}/` 폴더를 공유 우편함으로 쓰고, 메시지마다 검증된 JSON 파일 하나를 남긴다.
 
 - 표준 라이브러리만 쓰는 파이썬 스크립트 하나(`scripts/agent_mailbox.py`, Python 3.12+)
 - 메시지는 **불변**이다. 하드링크로 원자적으로 게시하고, 덮어쓰거나 지우지 않는다
 - 상태 흐름: `handoff/request → ack → accept → progress → result → close`
 - 안전장치: 저장소 밖 경로·`.git`·`.env` 차단, 첨부 SHA256 대조, 128 KB 상한, 응답이 원 작업의 범위를 바꾸지 못함, **ACK에 ACK 금지**(무한 응답 루프 방지)
-- 즉시 전달: Claude → Codex는 `notify`/`publish --notify`가 `codex queue --thread`로 Codex 스레드에 바로 넣고, Codex → Claude는 Claude가 백그라운드로 돌려 둔 `watch`가 새 메시지에 깨어나 세션을 깨운다(훅은 다음 프롬프트·도구 실행 때 알림)
+- 전달 수단: Claude → Codex는 `notify`/`publish --notify`가 `codex queue --thread`로 Codex 스레드에 바로 넣고(`notify`는 **Codex 전용**이며 `agy`에는 queue 명령이 없음), Claude → agy는 `templates/run_agy.ps1`로 비대화형 실행하며, Codex/agy → Claude는 백그라운드 `watch`나 프로젝트 훅(`hook`)으로 알린다
 
 > 보낸 이(`sender`)는 같은 OS 사용자 안의 협업 표시일 뿐 인증이 아니다. 상대 에이전트의 메시지는 **사용자 승인이 아니며**, 사용자가 허락하지 않은 일을 허용하지 않는다. 자세한 규칙은 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
@@ -34,6 +34,8 @@ python examples/demo.py
 
 - **Codex**: `templates/AGENTS.md`를 프로젝트 루트 `AGENTS.md`로 복사하고 금지 항목을 채운다.
 - **Claude Code**: `templates/CLAUDE.snippet.md`를 `CLAUDE.md`에 붙이고, `templates/claude-settings.json`의 훅을 프로젝트의 `.claude/settings.json`(또는 `.claude/settings.local.json`)에 넣는다. `<REPO_ROOT>`는 절대 경로로 바꾼다. 훅은 세션 시작·프롬프트 제출·도구 실행 뒤에 새 메시지 ID를 알려 준다.
+- **Antigravity (`agy`)**: 전용 작업 폴더(예: `C:\agy\<project>`)에 `templates/GEMINI.md`와 `templates/run_agy.ps1`을 복사하고 `CONTEXT.md`, `VERIFICATION_LOG.md`를 준비한다.
+- **`local` (선택)**: 로그 1차 요약·초안 작성 등 단순 잡무에만 선택적으로 쓰는 파티다(구현·설계 판정·민감 데이터에는 쓰지 않는다).
 
 4) 인계할 일이 생기면 `templates/HANDOVER.md` 양식으로 인계 문서를 쓰고, `handoff` 메시지로 그 문서를 가리킨다.
 
@@ -58,13 +60,15 @@ python scripts/agent_mailbox.py watch   --recipient claude --session-id <SESSION
 
 | 방향 | 수단 | 동작 |
 |---|---|---|
-| Claude → Codex | `notify --id <ID>` 또는 `publish --file F --notify` | 메시지의 `recipient_session`(Codex 스레드)으로 `codex queue --thread <스레드> --message <한 줄>`을 실행한다. Codex는 지금 하던 일을 끝내면 바로 읽는다 |
-| Codex → Claude | Claude가 백그라운드로 `watch --recipient claude --session-id <세션>` 실행 | 새 메시지가 게시되는 순간 `watch`가 끝나고, Claude Code는 끝난 백그라운드 작업을 알림으로 받아 세션을 깨운다. 메시지 하나마다 다시 건다 |
-| (보조) Codex → Claude | 프로젝트 훅 `hook` | 세션 시작·프롬프트 제출·도구 실행 뒤에 새 메시지 ID를 컨텍스트에 띄운다. Claude가 쉬는 중이면 다음 프롬프트까지 기다린다 |
+| Claude → Codex | `notify --id <ID>` 또는 `publish --file F --notify` | 메시지의 `recipient_session`(Codex 스레드)으로 `codex queue --thread <스레드> --message <한 줄>`을 실행한다(**Codex 전용**; `agy`는 queue 명령이 없음). Codex는 지금 하던 일을 끝내면 바로 읽는다 |
+| Claude → agy | `templates/run_agy.ps1` (비대화형 기본) | 메일함에 게시한 뒤 `run_agy.ps1`로 `agy -p`를 실행한다. 대화형 창이 필요할 때만 Claude가 붙여 넣을 문구를 작성해 사용자에게 건넨다 |
+| Codex/agy → Claude | Claude가 백그라운드로 `watch --recipient claude --session-id <세션>` 실행 | 새 메시지가 게시되는 순간 `watch`가 끝나고, Claude Code는 끝난 백그라운드 작업을 알림으로 받아 세션을 깨운다. 메시지 하나마다 다시 건다 |
+| (보조) Codex/agy → Claude | 프로젝트 훅 `hook` | 세션 시작·프롬프트 제출·도구 실행 뒤에 새 메시지 ID를 컨텍스트에 띄운다. Claude가 쉬는 중이면 다음 프롬프트까지 기다린다 |
 
-`notify` 규칙:
+`notify` 규칙 (**Codex 전용**):
 - `handoff/request/result/clarification`만 푸시한다. ACK·accept·progress·close는 푸시하지 않는다(알림 핑퐁 방지).
-- `recipient_session`이 없는 메시지, Claude에게 가는 메시지는 푸시하지 않는다(Claude 쪽은 `watch`/훅).
+- **Codex 전용이다.** `agy`와 `local`에는 `queue` 명령이 없으며, Claude에게 가는 메시지는 `watch`/훅을 쓴다(`recipient != "codex"`이면 큐를 실행하지 않고 `queued: false`와 사유를 반환한다).
+- `recipient_session`이 없는 메시지는 푸시하지 않는다.
 - `codex` 실행 파일은 `--codex PATH` → 환경 변수 `AGENT_MAILBOX_CODEX` → PATH 순서로 찾는다. Windows에서 Node 설치 위치(`C:\Program Files\nodejs\codex.cmd`)가 PATH에 없으면 `--codex`로 준다.
 - Windows의 `codex.cmd`는 인자를 cmd.exe가 다시 해석하므로, 알림 문장은 검증된 UUID와 고정된 ASCII 문구로만 만들고 허용 문자 밖이면 거부한다. 메시지 본문은 알림에 넣지 않는다.
 - `--dry-run`은 실행할 명령만 보여 준다. 큐 접수는 읽음이 아니다. 실제 이해·수락은 ACK/accept로 확인한다.
@@ -77,6 +81,22 @@ python scripts/agent_mailbox.py watch   --recipient claude --session-id <SESSION
 ```bash
 python scripts/agent_mailbox.py watch --recipient claude --session-id <CLAUDE_SESSION> --timeout 86400
 ```
+
+## Antigravity (`agy`) 연동과 선택 파티 (`local`)
+
+- **비대화형이 기본(`templates/run_agy.ps1`)**: `agy` CLI에는 열린 대화에 푸시하는 `queue` 명령이 없다. 따라서 Claude가 메일함에 요청을 게시한 뒤 `run_agy.ps1 -Task <지시문 파일> -Label <이름> -RepoRoot <공유 저장소> [-AgyHome <agy 홈 폴더>] [-Resume <대화 ID>]`로 비대화형(`agy -p`) 실행한다.
+- **대화형 폴백(fallback)**: 대화형 `agy` 창이 꼭 필요하면 Claude가 사용자에게 붙여 넣을 안내 문구를 작성해 전달하고, 사용자가 열린 `agy` 창에 직접 붙여 넣는다(Claude는 열린 대화를 직접 건드리지 않는다).
+- **지시로 지키는 범위(`--dangerously-skip-permissions`)**: 비대화형 실행은 권한 확인 프롬프트를 띄울 수 없어 `--dangerously-skip-permissions`를 쓴다. 즉 파일·명령 범위가 샌드박스가 아니라 **지침(`GEMINI.md`)과 작업 지시문**으로 유지되므로, 모든 지시문에는 **금지 행동**(공유 체크아웃 수정·브랜치 변경 금지, 프로세스/스케줄 조작 금지, `.env`/키 열람 금지, 프로젝트별 금지 사항)을 명시해야 하며, 개발 작업은 전용 git worktree(`<AGY_HOME>\wt-*`)로만 제한한다.
+- **열린 대화 재진입 금지**: 열려 있는 `agy` 대화(`presence/<ID>.lock`이 존재하는 상태)를 동시에 다시 열지 않는다. `-Resume <대화 ID>`는 **이미 종료된 비대화형 대화**에서 같은 주제의 후속 작업을 이어 갈 때만 쓴다.
+- **기억 유지**: `<AGY_HOME>`의 `GEMINI.md`(상시 규칙), `CONTEXT.md`(Claude가 갱신하는 현황), `VERIFICATION_LOG.md`(매 실행 끝에 추가하는 작업 기록), `agy_runs.jsonl`(`last_conversations.json`에서 추출한 대화 ID 색인)로 실행 간 맥락을 유지한다.
+- **`agy`의 회신 방법**: `agy`는 공유 저장소를 `--root`로 지정하고 `--sender agy`로 회신한다(본문 파일은 `<AGY_HOME>`에 작성):
+
+```powershell
+python scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-id <AGY_CONVERSATION_UUID> \
+    --reply-to <MESSAGE_UUID> --kind result --body-file <AGY_HOME>/result.txt
+```
+
+- **`local` 파티 (선택, 단순 잡무 전용)**: 로컬 LLM 등 보조 러너를 연결할 때 쓰는 선택적 파티다. 로그 요약·커밋/PR 초안 같은 단순 잡무(`read_only`/`proposal`)에만 쓰고, 구현(`implementation`)·설계 판정·민감 데이터에는 쓰지 않는다.
 
 ## 메시지 예시
 
@@ -123,7 +143,9 @@ agent-mailbox/
 │   ├── HANDOVER.md              # 인수인계 문서 양식
 │   ├── AGENTS.md                # Codex용 협업 지침
 │   ├── CLAUDE.snippet.md        # CLAUDE.md에 붙일 단락
-│   └── claude-settings.json     # Claude Code 훅 설정
+│   ├── claude-settings.json     # Claude Code 훅 설정
+│   ├── GEMINI.md                # Antigravity (agy) 상시 지침
+│   └── run_agy.ps1              # Antigravity (agy) 비대화형 실행 래퍼
 ├── examples/
 │   ├── demo.py                  # 전체 흐름 데모 (임시 폴더)
 │   └── envelopes/*.json         # 데모가 만든 메시지 예시

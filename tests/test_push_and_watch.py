@@ -75,9 +75,19 @@ def test_acks_messages_to_claude_and_missing_threads_are_never_pushed(tmp_path: 
     mailbox.publish(tmp_path, no_thread)
     to_claude = message()
     mailbox.publish(tmp_path, to_claude)
+    to_agy = message(sender="claude", recipient="agy", recipient_session=str(mailbox.uuid4()))
+    mailbox.publish(tmp_path, to_agy)
+    to_local = message(sender="claude", recipient="local")
+    mailbox.publish(tmp_path, to_local)
     reply = mailbox.reply(tmp_path, "codex", request["id"], "ack", "read", session_id=CODEX_THREAD)
     run = FakeRun()
     assert mailbox.notify(tmp_path, to_claude["id"], run=run)["queued"] is False
+    agy_notify = mailbox.notify(tmp_path, to_agy["id"], run=run)
+    assert agy_notify["queued"] is False and "Codex-only" in agy_notify["reason"]
+    local_notify = mailbox.notify(tmp_path, to_local["id"], run=run)
+    assert local_notify["queued"] is False and "Codex-only" in local_notify["reason"]
+    with pytest.raises(ValueError, match="only messages to codex"):
+        mailbox.notify_argv(tmp_path, to_agy, "codex")
     with pytest.raises(ValueError, match="recipient_session"):
         mailbox.notify(tmp_path, no_thread["id"], codex="codex", run=run)
     assert reply["recipient"] == "claude"
@@ -87,6 +97,11 @@ def test_acks_messages_to_claude_and_missing_threads_are_never_pushed(tmp_path: 
     with pytest.raises(ValueError, match="never pushed"):
         mailbox.notify(tmp_path, ack_to_codex["id"], codex="codex", run=run)
     assert run.calls == []
+
+
+def test_notify_help_explicitly_states_codex_only() -> None:
+    top_help = " ".join(mailbox.parser().format_help().split())
+    assert "Codex" in top_help and "agy has no queue command" in top_help
 
 
 def test_a_failing_codex_queue_is_an_error(tmp_path: Path) -> None:

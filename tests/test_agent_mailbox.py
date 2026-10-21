@@ -331,3 +331,29 @@ def test_tampered_reply_does_not_silently_suppress_work(tmp_path: Path) -> None:
     path.write_text(json.dumps({**response, "task_id": "other-task"}), encoding="utf-8")
     with pytest.raises(ValueError):
         mailbox.inbox(tmp_path, "claude")
+
+
+def test_agy_and_local_parties_exchange_messages_with_claude_and_codex(tmp_path: Path) -> None:
+    assert mailbox.AGENTS == ("claude", "codex", "agy", "local")
+    agy_session = str(uuid4())
+    claude_session = str(uuid4())
+    to_agy = message(
+        sender="claude",
+        recipient="agy",
+        sender_session=claude_session,
+        recipient_session=agy_session,
+    )
+    mailbox.publish(tmp_path, to_agy)
+    assert mailbox.inbox(tmp_path, "agy", session_id=agy_session) == [to_agy]
+    ack = mailbox.reply(tmp_path, "agy", to_agy["id"], "ack", "Read by agy", session_id=agy_session)
+    assert ack["recipient"] == "claude"
+    result = mailbox.reply(
+        tmp_path, "agy", to_agy["id"], "result", "Verified by agy", session_id=agy_session
+    )
+    assert mailbox.inbox(tmp_path, "claude", session_id=claude_session) == [result]
+
+    to_local = message(sender="claude", recipient="local", sender_session=claude_session)
+    mailbox.publish(tmp_path, to_local)
+    assert mailbox.inbox(tmp_path, "local") == [to_local]
+    local_result = mailbox.reply(tmp_path, "local", to_local["id"], "result", "Summary draft")
+    assert local_result["recipient"] == "claude"
