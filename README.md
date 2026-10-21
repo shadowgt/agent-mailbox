@@ -166,6 +166,7 @@ python scripts/agent_mailbox.py --root <REPO_ROOT> reply --sender agy --session-
 agent-mailbox/
 ├── scripts/agent_mailbox.py     # 도구 (publish / inbox / show / reply / hook / notify / watch / doctor)
 ├── docs/PROTOCOL.md             # 규약: 승인 범위, 필드, 상태, 알림, 전달 확인
+├── docs/agent-comparison.md     # 같은 과제로 본 Gemini·Codex·로컬 모델 비교와 분배
 ├── templates/
 │   ├── HANDOVER.md              # 인수인계 문서 양식
 │   ├── AGENTS.md                # Codex용 협업 지침
