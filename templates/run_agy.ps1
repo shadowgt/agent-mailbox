@@ -22,7 +22,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Task,
     [Parameter(Mandatory = $true)][string]$Label,
-    [string]$AgyHome = $PSScriptRoot,
+    [string]$AgyHome = '',
     [string]$RepoRoot = '',
     [string]$Resume = '',
     [string]$Model = 'gemini-4-argon-high',
@@ -32,6 +32,8 @@ param(
     [string]$ConversationMap = (Join-Path $env:USERPROFILE '.gemini\antigravity-cli\cache\last_conversations.json')
 )
 $ErrorActionPreference = 'Stop'
+# $PSScriptRoot is empty inside param() defaults on Windows PowerShell 5.1, so resolve it here.
+if ($AgyHome -eq '') { $AgyHome = Split-Path -Parent $MyInvocation.MyCommand.Path }
 if ($Task.Contains('"')) {
     throw "Refusing -Task path containing a double quote: $Task"
 }
