@@ -430,6 +430,99 @@ def codex_executable(explicit: str | None = None) -> str:
     return str(chosen)
 
 
+def agy_executable(explicit: str | None = None) -> str | None:
+    """``agy`` on PATH or at ``%LOCALAPPDATA%\\agy\\bin\\agy.exe``."""
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(explicit)
+    which_agy = shutil.which("agy")
+    if which_agy:
+        candidates.append(which_agy)
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        candidates.append(str(Path(local_app) / "agy/bin/agy.exe"))
+    for candidate in candidates:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _doctor_fs_checks(root: Path) -> list[dict[str, str]]:
+    checks: list[dict[str, str]] = []
+    root_ok = False
+    try:
+        require(root.is_dir(), f"{root} is not an existing directory")
+        fd, tmp = tempfile.mkstemp(prefix=".doctor-", suffix=".tmp", dir=root)
+        os.close(fd)
+        Path(tmp).unlink(missing_ok=True)
+        root_ok = True
+        checks.append({"check": "root", "status": "PASS", "detail": f"{root} is writable"})
+    except (ValueError, OSError) as exc:
+        checks.append({"check": "root", "status": "FAIL", "detail": str(exc)})
+    bridge_dir: Path | None = None
+    if root_ok:
+        try:
+            bridge_dir = relative_path(root, ".agent-bridge")
+            bridge_dir.mkdir(parents=True, exist_ok=True)
+            ignore = bridge_dir / ".gitignore"
+            if not ignore.exists():
+                ignore.write_bytes(b"*\n")
+            checks.append({"check": "bridge", "status": "PASS", "detail": ".agent-bridge is ready"})
+        except (ValueError, OSError) as exc:
+            checks.append({"check": "bridge", "status": "FAIL", "detail": str(exc)})
+    else:
+        checks.append({"check": "bridge", "status": "FAIL", "detail": "root unavailable"})
+    if bridge_dir is not None:
+        src_path: Path | None = None
+        dst_path: Path | None = None
+        try:
+            fd, src_tmp = tempfile.mkstemp(prefix=".doctor-src-", suffix=".tmp", dir=bridge_dir)
+            os.close(fd)
+            src_path = Path(src_tmp)
+            dst_path = bridge_dir / f".doctor-link-{uuid4().hex}.tmp"
+            os.link(src_path, dst_path)
+            checks.append({"check": "hardlink", "status": "PASS", "detail": "os.link works"})
+        except OSError as exc:
+            checks.append({"check": "hardlink", "status": "FAIL", "detail": str(exc)})
+        finally:
+            if dst_path is not None:
+                dst_path.unlink(missing_ok=True)
+            if src_path is not None:
+                src_path.unlink(missing_ok=True)
+    else:
+        checks.append({"check": "hardlink", "status": "FAIL", "detail": "bridge unavailable"})
+    return checks
+
+
+def doctor(root: Path, *, codex: str | None = None) -> list[dict[str, str]]:
+    ver = f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}"
+    py_ok = sys.version_info[:2] >= (3, 12)
+    checks: list[dict[str, str]] = [
+        {
+            "check": "python",
+            "status": "PASS" if py_ok else "FAIL",
+            "detail": f"Python {ver} (>= 3.12 required)",
+        },
+        *_doctor_fs_checks(root),
+    ]
+    try:
+        checks.append({"check": "codex", "status": "PASS", "detail": codex_executable(codex)})
+    except ValueError as exc:
+        checks.append({"check": "codex", "status": "WARN", "detail": str(exc)})
+    agy_path = agy_executable()
+    if agy_path is not None:
+        checks.append({"check": "agy", "status": "PASS", "detail": agy_path})
+    else:
+        checks.append(
+            {
+                "check": "agy",
+                "status": "WARN",
+                "detail": "agy CLI not found on PATH or %LOCALAPPDATA%\\agy\\bin\\agy.exe",
+            }
+        )
+    return checks
+
+
 def notify_argv(root: Path, item: Message, codex: str) -> list[str]:
     """``codex queue --thread <recipient_session> --message <text>`` for a message to Codex."""
     require(item["recipient"] == "codex", "only messages to codex can be pushed")
@@ -533,11 +626,20 @@ def parser() -> argparse.ArgumentParser:
     waiting.add_argument("--session-id")
     waiting.add_argument("--timeout", type=float, default=3600.0, help="seconds")
     waiting.add_argument("--poll", type=float, default=2.0, help="seconds")
+    checking = commands.add_parser(
+        "doctor", help="check Python, repo root, .agent-bridge, hard links, and CLIs"
+    )
+    checking.add_argument("--codex", help="codex CLI path (default: $AGENT_MAILBOX_CODEX, PATH)")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "doctor":
+        checks = doctor(args.root, codex=args.codex)
+        for entry in checks:
+            print(f"{entry['status']} {entry['check']}: {entry['detail']}")
+        return 1 if any(entry["status"] == "FAIL" for entry in checks) else 0
     try:
         if args.command == "hook":
             raw = sys.stdin.read(MAX_BYTES + 1)

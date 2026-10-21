@@ -228,3 +228,71 @@ def test_watch_wakes_when_another_process_publishes(tmp_path: Path) -> None:
             ]
         )
     assert code == 1 and "no new message" in err.getvalue()
+
+
+def test_doctor_passes_with_mocked_binaries_and_warns_when_clis_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    codex_bin = tmp_path / "codex.cmd"
+    codex_bin.write_text("@echo off\n", encoding="utf-8")
+    local_app = tmp_path / "localapp"
+    agy_bin = local_app / "agy/bin/agy.exe"
+    agy_bin.parent.mkdir(parents=True)
+    agy_bin.write_text("agy", encoding="utf-8")
+
+    monkeypatch.setenv(mailbox.CODEX_ENV, str(codex_bin))
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app))
+    monkeypatch.setattr(mailbox.shutil, "which", lambda name: None)
+
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 6
+    assert all(line.startswith("PASS ") for line in out)
+    assert not list(repo.rglob(".doctor-*"))
+
+    monkeypatch.delenv(mailbox.CODEX_ENV)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty_localapp"))
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 0
+    warn_lines = capsys.readouterr().out.strip().splitlines()
+    statuses = {line.split()[1].rstrip(":"): line.split()[0] for line in warn_lines}
+    assert statuses == {
+        "python": "PASS",
+        "root": "PASS",
+        "bridge": "PASS",
+        "hardlink": "PASS",
+        "codex": "WARN",
+        "agy": "WARN",
+    }
+
+
+def test_doctor_fails_when_required_checks_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(mailbox.shutil, "which", lambda name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+
+    missing_root = tmp_path / "does-not-exist"
+    assert mailbox.main(["--root", str(missing_root), "doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL root:" in out
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(mailbox.sys, "version_info", (3, 11, 8, "final", 0))
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 1
+    assert "FAIL python:" in capsys.readouterr().out
+
+    monkeypatch.undo()
+    monkeypatch.setattr(mailbox.shutil, "which", lambda name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+
+    def broken_link(src: Path, dst: Path) -> None:
+        raise OSError("hard links disabled")
+
+    monkeypatch.setattr(mailbox.os, "link", broken_link)
+    assert mailbox.main(["--root", str(repo), "doctor"]) == 1
+    link_out = capsys.readouterr().out
+    assert "PASS bridge:" in link_out and "FAIL hardlink:" in link_out
+    assert not list(repo.rglob(".doctor-*"))
