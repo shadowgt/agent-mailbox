@@ -48,7 +48,9 @@ UTF-8 JSON 파일 하나가 메시지 하나다. `publish`가 검증한 뒤 임�
 | `body` | 목적·완료 기준·제약·증거. 16,000자 이내 |
 | `artifacts` | `{path, sha256}` 목록. 게시 때 해시를 대조한다 |
 
-도구가 거부하는 것: 저장소 밖 경로, `..`, 역슬래시·드라이브 경로, `.git`·`.env*`, 제어 문자, UTC가 아닌 시각, 128 KB 초과, 응답이 원 메시지의 스레드·작업·기준 커밋·범위를 바꾸는 것, ACK·reject·close에 대한 응답.
+도구가 거부하는 것: 저장소 밖 경로, `..`, 역슬래시·드라이브 경로, `.git`·`.env*`, 제어 문자, UTC가 아닌 시각, 128 KB 초과, 응답이 원 메시지의 스레드·작업·기준 커밋·범위를 바꾸는 것, ACK·reject·close에 대한 응답, 부모 메시지가 없거나 손상된 응답(`reply parent <ID> is missing` / `reply parent <ID> is invalid: ...`).
+
+`inbox`, `watch`, `hook`은 메일함 안의 각 파일을 개별 검증한다. 깨진 JSON, 스키마 불일치, 잘못된 폴더(`recipient`와 폴더 불일치), 변조된 응답 파일이 있어도 정상 메시지의 수신·알림을 막지 않으며, 잘못된 파일은 `stdout` JSON 목록 모양을 그대로 유지한 채 `stderr`에 `agent mailbox: invalid message <path>: <reason>` 한 줄씩 별도 보고한다. `hook` 알림 문구는 저장소의 `docs/PROTOCOL.md`를 가리키며, 해당 파일이 없고 `docs/agent_handoff_protocol.md`만 있는 저장소에서는 그 경로를 가리킨다.
 
 작업 요청 본문에는 목적, **사용자 승인 근거**, 허용 파일, 수정 금지 대상, 원하는 산출물, 검증 방법, 기한을 적는다. 정정은 새 ID와 `reply_to`로 이전 내용을 참조하고 무엇을 대체하는지 밝힌다.
 
