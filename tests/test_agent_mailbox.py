@@ -204,13 +204,31 @@ def test_hook_notice_is_bounded_once_per_session_without_body_injection(tmp_path
     output = mailbox.hook(tmp_path, payload)
     context = output["hookSpecificOutput"]["additionalContext"]
     assert "EVIL" not in context
-    assert "docs/agent_handoff_protocol.md" in context
+    assert "docs/PROTOCOL.md" in context
     assert context.count(".json") == 5
     second = mailbox.hook(tmp_path, payload)
     assert second["hookSpecificOutput"]["additionalContext"].count(".json") == 1
     assert mailbox.hook(tmp_path, payload) == {}
     assert len(mailbox.inbox(tmp_path, "claude")) == 6  # Delivery is not an ACK.
     assert mailbox.hook(tmp_path, {**payload, "session_id": str(uuid4())})
+
+
+def test_hook_protocol_path_prefers_protocol_md_and_falls_back_to_renamed_doc(
+    tmp_path: Path,
+) -> None:
+    mailbox.publish(tmp_path, message())
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "agent_handoff_protocol.md").write_text("# renamed\n", encoding="utf-8")
+    payload = {"cwd": str(tmp_path), "session_id": str(uuid4()), "hook_event_name": "SessionStart"}
+    fallback_ctx = mailbox.hook(tmp_path, payload)["hookSpecificOutput"]["additionalContext"]
+    assert "docs/agent_handoff_protocol.md" in fallback_ctx
+
+    (docs / "PROTOCOL.md").write_text("# standard\n", encoding="utf-8")
+    standard_ctx = mailbox.hook(tmp_path, {**payload, "session_id": str(uuid4())})[
+        "hookSpecificOutput"
+    ]["additionalContext"]
+    assert "docs/PROTOCOL.md" in standard_ctx
 
 
 @pytest.mark.parametrize(
@@ -323,14 +341,112 @@ def test_hook_cli_outputs_only_notice(
     assert "PRIVATE" not in output
 
 
-def test_tampered_reply_does_not_silently_suppress_work(tmp_path: Path) -> None:
+def test_tampered_reply_does_not_silently_suppress_work(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     item = message()
     mailbox.publish(tmp_path, item)
     response = mailbox.reply(tmp_path, "claude", item["id"], "ack", "Read")
     path = tmp_path / ".agent-bridge/mailboxes/codex" / f"{response['id']}.json"
     path.write_text(json.dumps({**response, "task_id": "other-task"}), encoding="utf-8")
-    with pytest.raises(ValueError):
-        mailbox.inbox(tmp_path, "claude")
+    assert mailbox.inbox(tmp_path, "claude") == [item]
+    err = capsys.readouterr().err
+    assert response["id"] in err and "reply changes thread, task, base, or scope" in err
+
+
+def test_invalid_files_are_reported_to_stderr_without_blocking_inbox_watch_or_hook(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    valid = message()
+    mailbox.publish(tmp_path, valid)
+    claude_box = tmp_path / ".agent-bridge/mailboxes/claude"
+    (claude_box / f"{uuid4()}.json").write_text("{not valid json", encoding="utf-8")
+    bad_schema_id = str(uuid4())
+    (claude_box / f"{bad_schema_id}.json").write_text(
+        json.dumps({**message(id=bad_schema_id), "version": 99}), encoding="utf-8"
+    )
+    misfiled = message(sender="claude", recipient="codex")
+    (claude_box / f"{misfiled['id']}.json").write_text(json.dumps(misfiled), encoding="utf-8")
+
+    assert mailbox.inbox(tmp_path, "claude") == [valid]
+    err = capsys.readouterr().err
+    assert "invalid JSON" in err
+    assert "unsupported version" in err
+    assert "misfiled message" in err
+
+    assert mailbox.main(["--root", str(tmp_path), "inbox", "--recipient", "claude"]) == 0
+    cli = capsys.readouterr()
+    assert json.loads(cli.out) == [valid]
+    assert "invalid message" in cli.err
+
+    watched = mailbox.watch(tmp_path, "claude", timeout=1.0, now=lambda: 0.0)
+    assert watched is not None and watched["id"] == valid["id"]
+    capsys.readouterr()
+
+    payload = {"cwd": str(tmp_path), "session_id": str(uuid4()), "hook_event_name": "SessionStart"}
+    hook_out = mailbox.hook(tmp_path, payload)
+    assert valid["id"] in hook_out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_reply_with_missing_or_invalid_parent_fails_with_explicit_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing_id = str(uuid4())
+    with pytest.raises(ValueError, match=f"reply parent {missing_id} is missing"):
+        mailbox.reply(tmp_path, "claude", missing_id, "ack", "Read")
+    orphan_reply = message(
+        kind="ack", sender="claude", recipient="codex", reply_to=missing_id, expires_at=None
+    )
+    with pytest.raises(ValueError, match=f"reply parent {missing_id} is missing"):
+        mailbox.publish(tmp_path, orphan_reply)
+
+    body_file = tmp_path / "body.txt"
+    body_file.write_text("ack body", encoding="utf-8")
+    assert (
+        mailbox.main(
+            [
+                "--root",
+                str(tmp_path),
+                "reply",
+                "--sender",
+                "claude",
+                "--reply-to",
+                missing_id,
+                "--kind",
+                "ack",
+                "--body-file",
+                str(body_file),
+            ]
+        )
+        == 2
+    )
+    assert f"reply parent {missing_id} is missing" in capsys.readouterr().err
+
+    bad_parent_id = str(uuid4())
+    claude_box = tmp_path / ".agent-bridge/mailboxes/claude"
+    claude_box.mkdir(parents=True, exist_ok=True)
+    (claude_box / f"{bad_parent_id}.json").write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ValueError, match=f"reply parent {bad_parent_id} is invalid: invalid JSON"):
+        mailbox.reply(tmp_path, "claude", bad_parent_id, "ack", "Read")
+    assert (
+        mailbox.main(
+            [
+                "--root",
+                str(tmp_path),
+                "reply",
+                "--sender",
+                "claude",
+                "--reply-to",
+                bad_parent_id,
+                "--kind",
+                "ack",
+                "--body-file",
+                str(body_file),
+            ]
+        )
+        == 2
+    )
+    assert f"reply parent {bad_parent_id} is invalid" in capsys.readouterr().err
 
 
 def test_agy_and_local_parties_exchange_messages_with_claude_and_codex(tmp_path: Path) -> None:

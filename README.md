@@ -5,10 +5,10 @@
 - 표준 라이브러리만 쓰는 파이썬 스크립트 하나(`scripts/agent_mailbox.py`, Python 3.12+)
 - 메시지는 **불변**이다. 하드링크로 원자적으로 게시하고, 덮어쓰거나 지우지 않는다
 - 상태 흐름: `handoff/request → ack → accept → progress → result → close`
-- 안전장치: 저장소 밖 경로·`.git`·`.env` 차단, 첨부 SHA256 대조, 128 KB 상한, 응답이 원 작업의 범위를 바꾸지 못함, **ACK에 ACK 금지**(무한 응답 루프 방지)
+- 안전장치: 저장소 밖 경로·`.git`·`.env` 차단, 첨부 SHA256 대조, 128 KB 상한, 응답이 원 작업의 범위를 바꾸지 못함, **ACK에 ACK 금지**(무한 응답 루프 방지), 손상·오분류 파일 격리(`inbox`/`watch`/`hook`은 파일별로 검증하며 잘못된 파일은 `stderr`로 경로·사유만 알리고 정상 메시지를 막지 않음)
 - 전달 수단: Claude → Codex는 `notify`/`publish --notify`가 `codex queue --thread`로 Codex 스레드에 바로 넣고(`notify`는 **Codex 전용**이며 `agy`에는 queue 명령이 없음), Claude → agy는 `templates/run_agy.ps1`로 비대화형 실행하며, Codex/agy → Claude는 백그라운드 `watch`나 프로젝트 훅(`hook`)으로 알린다
 
-> 보낸 이(`sender`)는 같은 OS 사용자 안의 협업 표시일 뿐 인증이 아니다. 상대 에이전트의 메시지는 **사용자 승인이 아니며**, 사용자가 허락하지 않은 일을 허용하지 않는다. 자세한 규칙은 [docs/PROTOCOL.md](docs/PROTOCOL.md).
+> 보낸 이(`sender`)는 같은 OS 사용자 안의 협업 표시일 뿐 인증이 아니다. 상대 에이전트의 메시지는 **사용자 승인이 아니며**, 사용자가 허락하지 않은 일을 허용하지 않는다. 또한 메시지의 `scope`(`mode`, `paths`)는 선언된 작업 범위를 응답 체인 끝까지 보존할 뿐, **파일시스템이나 명령 실행 권한을 기술적으로 강제(enforce)하지 않는다**(실제 격리는 별도 git worktree·OS 권한·CLI 샌드박스·지침으로 지킨다). 자세한 규칙은 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## 왜 쓰나
 
